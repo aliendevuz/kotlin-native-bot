@@ -1,0 +1,55 @@
+#!/bin/sh
+set -euo pipefail
+
+# Simple Lambda custom runtime bootstrap using curl to talk to the Runtime API.
+# Expects the native executable `kotlin-native-bot.kexe` to be next to this script.
+
+RUNTIME_API="${AWS_LAMBDA_RUNTIME_API:-}"
+if [ -z "$RUNTIME_API" ]; then
+  echo "AWS_LAMBDA_RUNTIME_API is not set" >&2
+  exit 1
+fi
+
+HANDLER="./kotlin-native-bot.kexe"
+if [ ! -x "$HANDLER" ]; then
+  echo "Handler executable $HANDLER not found or not executable" >&2
+  exit 2
+fi
+
+while true; do
+  headers=$(mktemp)
+  body=$(mktemp)
+  # Get next invocation
+  if ! curl -sS -D "$headers" "http://${RUNTIME_API}/2018-06-01/runtime/invocation/next" -o "$body"; then
+    echo "Failed to get next invocation" >&2
+    rm -f "$headers" "$body"
+    sleep 1
+    continue
+  fi
+
+  request_id=$(grep -i '^Lambda-Runtime-Aws-Request-Id:' "$headers" | awk '{print $2}' | tr -d '\r')
+  if [ -z "$request_id" ]; then
+    echo "No request id in runtime response headers" >&2
+    cat "$headers" >&2
+    rm -f "$headers" "$body"
+    sleep 1
+    continue
+  fi
+
+  # Run the native handler with the event on stdin; capture stdout/stderr
+  out=$(mktemp)
+  err=$(mktemp)
+  if "$HANDLER" < "$body" > "$out" 2> "$err"; then
+    # Post the handler output as the invocation response
+    curl -sS -X POST "http://${RUNTIME_API}/2018-06-01/runtime/invocation/${request_id}/response" \
+      -H "Content-Type: application/json" --data-binary @"$out" || true
+  else
+    # Handler failed: report error to runtime
+    errcontent=$(cat "$err" | sed 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
+    curl -sS -X POST "http://${RUNTIME_API}/2018-06-01/runtime/invocation/${request_id}/error" \
+      -H "Content-Type: application/json" \
+      --data-binary "{\"errorMessage\":\"Handler failed\",\"errorType\":\"HandlerError\",\"details\":\"$errcontent\"}" || true
+  fi
+
+  rm -f "$headers" "$body" "$out" "$err"
+done

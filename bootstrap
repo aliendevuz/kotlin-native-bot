@@ -16,6 +16,14 @@ if [ ! -x "$HANDLER" ]; then
   exit 2
 fi
 
+# Allow bundling shared libraries under ./lib and prefer them at runtime
+if [ -d "./lib" ]; then
+  export LD_LIBRARY_PATH="$(pwd)/lib:${LD_LIBRARY_PATH:-}"
+  echo "LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH" >&2
+else
+  echo "No ./lib directory found — if your binary needs extra .so files, place them in ./lib" >&2
+fi
+
 while true; do
   headers=$(mktemp)
   body=$(mktemp)
